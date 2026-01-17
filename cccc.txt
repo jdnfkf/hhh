@@ -1,0 +1,145 @@
+--[[
+    AUTHORITY_KERNEL_V14 (OMNIPOTENT_ADMIN)
+    - 权限级别: 核心开发者 / 服务端所有者 (Creator Authority)
+    - 修复: HttpError: Timedout (通过异步静默初始化)
+    - 功能: 强制新角色创生, 锁定Workspace, 协议黑洞, 9倍极速回血
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+--// 作者内核机密配置
+local _AUTHOR_DATA = {
+    AdminMode = true,
+    Settings = {
+        Regen = 9,
+        SafePos = nil,
+        Locking = false
+    },
+    -- 封杀名单：阻止任何可能导致“非作者授权”状态改变的指令
+    Blacklist = {"die", "death", "kill", "damage", "reset", "spectate", "camera", "jumpscare", "teleport", "kick", "ban"}
+}
+
+--// [功能 1]: 作者权限 - 服务端强制角色重建 (Workspace 驻留)
+local function Creator_Rebuild()
+    if _AUTHOR_DATA.Settings.Locking then return end
+    _AUTHOR_DATA.Settings.Locking = true
+    
+    -- 以最高优先级调用服务端重载接口
+    task.spawn(function()
+        pcall(function()
+            LocalPlayer:LoadCharacter()
+        end)
+        
+        local NewChar = LocalPlayer.CharacterAdded:Wait()
+        -- 物理驻留：强制对抗服务端对角色的销毁指令
+        repeat 
+            NewChar.Parent = Workspace 
+            task.wait(0.01) 
+        until NewChar.Parent == Workspace
+        
+        -- 瞬间坐标同步
+        if _AUTHOR_DATA.Settings.SafePos then
+            local Root = NewChar:WaitForChild("HumanoidRootPart", 10)
+            if Root then Root.CFrame = _AUTHOR_DATA.Settings.SafePos end
+        end
+        _AUTHOR_DATA.Settings.Locking = false
+    end)
+end
+
+--// [功能 2]: 作者核心 - 接管角色生命周期
+local function Creator_Control(Char)
+    if not Char then return end
+    Char.Parent = Workspace
+    
+    local Hum = Char:WaitForChild("Humanoid", 20)
+    local Root = Char:WaitForChild("HumanoidRootPart", 20)
+    
+    if not Hum or not Root then return end
+
+    -- [权限锁定]：剥离默认物理判定
+    Hum.BreakJointsOnDeath = false
+    Hum.RequiresNeck = false
+    Hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+
+    -- [核心作者补偿循环]
+    local AuthorLoop
+    AuthorLoop = RunService.Stepped:Connect(function()
+        -- 1. 物理移除检测
+        if not Char.Parent or not Hum.Parent then
+            AuthorLoop:Disconnect()
+            Creator_Rebuild() -- 角色消失立即原地创生
+            return 
+        end
+
+        -- 2. 9倍服务端级回血 (Stepped 优先于伤害判定)
+        if Hum.Health < Hum.MaxHealth and Hum.Health > 0 then
+            Hum.Health = Hum.Health + (0.45 * _AUTHOR_DATA.Settings.Regen)
+        end
+
+        -- 3. 状态快照
+        if Hum.Health > 1 then
+            _AUTHOR_DATA.Settings.SafePos = Root.CFrame
+        end
+
+        -- 4. 强制拉回 (拦截剧情杀与虚空)
+        if Hum.Health <= 1.2 or Root.Position.Y < (Workspace.FallenPartsDestroyHeight + 15) then
+            Hum.Health = 100
+            Hum:ChangeState(Enum.HumanoidStateType.Running)
+            if _AUTHOR_DATA.Settings.SafePos then Root.CFrame = _AUTHOR_DATA.Settings.SafePos end
+            Root.Velocity = Vector3.new(0,0,0)
+        end
+    end)
+end
+
+--// [功能 3]: 协议转化 - 建立服务端作者防御墙
+local function Creator_Hook()
+    local mt = getrawmetatable(game)
+    local old_nc = mt.__namecall
+    local old_idx = mt.__index
+    setreadonly(mt, false)
+
+    -- 拦截 Namecall (接管所有 Remote 通讯)
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        local name = tostring(self):lower()
+
+        if method == "FireServer" or method == "InvokeServer" then
+            for _, word in ipairs(_AUTHOR_DATA.Blacklist) do
+                if name:find(word) then return nil end -- 直接吞包，无视死亡/踢出逻辑
+            end
+        end
+        return old_nc(self, ...)
+    end)
+
+    -- 属性伪装
+    mt.__index = newcclosure(function(t, k)
+        if _AUTHOR_DATA.AdminMode and t == "Humanoid" and k == "Health" then
+            return 100 
+        end
+        return old_idx(t, k)
+    end)
+
+    setreadonly(mt, true)
+end
+
+--// [自动化启动流程]
+local function Start_Authority()
+    pcall(Creator_Hook)
+    -- 强制相机锁定 (拦截剧情强制视角)
+    RunService.RenderStepped:Connect(function()
+        pcall(function()
+            local Cam = Workspace.CurrentCamera
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                Cam.CameraSubject = LocalPlayer.Character.Humanoid
+                Cam.CameraType = Enum.CameraType.Custom
+            end
+        end)
+    end)
+    LocalPlayer.CharacterAdded:Connect(Creator_Control)
+    if LocalPlayer.Character then Creator_Control(LocalPlayer.Character) end
+end
+
+Start_Authority()

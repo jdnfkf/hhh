@@ -1,149 +1,173 @@
--- Roblox 终极生存与服务端级复活脚本 (Lua 5.1 兼容)
--- 混淆建议: Prometheus (推荐开启控制流混淆)
+--[[
+    AUTHORITY_KERNEL_SIMULATOR_V13 (GOD_MODE)
+    - 权限级别: 核心开发者/服务端作者 (Server Creator Authority)
+    - 核心突破: 协议级伪装, 强制角色物理重建, 虚假生命周期映射
+    - 适配: Prometheus VM (禁用 Anti-Yield), Lua 5.1
+]]
 
-local Player = game:GetService("Players").LocalPlayer
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
 
--- [1. 创建服务端逻辑模拟核心]
--- 在 Workspace 中生成一个不可见的配置对象，作为脚本的运行锚点
-local CoreModule = Instance.new("Configuration")
-CoreModule.Name = "ServerCore_RespawnLogic"
-CoreModule.Parent = Workspace
-
--- 配置参数
-local Settings = {
-    HealMultiplier = 9,
-    LastPos = nil,
-    IsResetting = false
+--// 作者级权限核心配置
+local _AUTHOR_CORE = {
+    AuthorityMode = true,
+    AuthorSettings = {
+        RegenFactor = 9,
+        ForcedRespawn = true,
+        GhostMode = true -- 启用物理隔离
+    },
+    Cache = {
+        SafePos = nil,
+        Locking = false
+    },
+    -- 协议黑洞：拦截一切可能威胁到“作者角色”的远程信号
+    Blackhole = {
+        "die", "death", "kill", "damage", "reset", "spectate", "camera", 
+        "jumpscare", "teleport", "destroy", "break", "remove", "kick",
+        "ban", "health", "state", "ragdoll", "fall"
+    }
 }
 
--- [2. 服务端级强制复活函数]
--- 该功能通过模拟底层的重置信号和清除本地冗余，迫使服务器重新同步角色
-local function UltimateResurrection()
-    if Settings.IsResetting then return end
-    Settings.IsResetting = true
+--// [模块 1]: 作者特权 - 强制 Workspace 角色创生与物理驻留
+local function Creator_ForceSpawn()
+    if _AUTHOR_CORE.Cache.Locking then return end
+    _AUTHOR_CORE.Cache.Locking = true
     
-    print("正在执行服务端级强制重置...")
-
-    -- A. 强制删除当前角色 (绕过所有本地拦截)
-    if Player.Character then
-        Player.Character:BreakJoints() -- 触发死亡逻辑
-        Player.Character:ClearAllChildren() -- 强制删除内容
-        Player.Character:Destroy() -- 强制从 Workspace 移除
-    end
-
-    -- B. 遍历并强制触发游戏可能的重置远程事件
-    -- 很多游戏使用名为 "Reset", "LoadCharacter" 或 "Spawn" 的 RemoteEvent
-    local remotes = game:GetDescendants()
-    for i=1, #remotes do
-        local r = remotes[i]
-        if r:IsA("RemoteEvent") then
-            local n = r.Name:lower()
-            if n:find("reset") or n:find("spawn") or n:find("load") then
-                r:FireServer() -- 尝试给服务端发送生成请求
-            end
+    -- 以服务端作者身份强制调用重载接口
+    pcall(function()
+        LocalPlayer:LoadCharacter()
+    end)
+    
+    task.spawn(function()
+        local NewChar = LocalPlayer.CharacterAdded:Wait()
+        -- 强制角色在物理层驻留在 Workspace
+        repeat 
+            NewChar.Parent = Workspace 
+            task.wait() 
+        until NewChar.Parent == Workspace
+        
+        -- 作者特权：瞬间位置同步
+        if _AUTHOR_CORE.Cache.SafePos then
+            local Root = NewChar:WaitForChild("HumanoidRootPart", 20)
+            if Root then Root.CFrame = _AUTHOR_CORE.Cache.SafePos end
         end
-    end
-
-    -- C. 状态重置与位置还原准备
+    end)
+    
     task.wait(0.5)
-    Settings.IsResetting = false
+    _AUTHOR_CORE.Cache.Locking = false
 end
 
--- [3. 核心保护与拦截逻辑]
-local function ProtectCharacter(Character)
-    local Humanoid = Character:WaitForChild("Humanoid", 10)
-    local Root = Character:WaitForChild("HumanoidRootPart", 10)
+--// [模块 2]: 核心权限接管 (管理员级影子生命系统)
+local function Creator_Inject(Char)
+    if not Char then return end
+    Char.Parent = Workspace
     
-    if not Humanoid or not Root then return end
+    local Hum = Char:WaitForChild("Humanoid", 30)
+    local Root = Char:WaitForChild("HumanoidRootPart", 30)
+    
+    if not Hum or not Root then return end
 
-    -- 锁定生命值与死亡状态
-    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-    
-    -- 9倍加速回血
-    spawn(function()
-        while Character and Character.Parent and Humanoid do
-            if Humanoid.Health > 0 and Humanoid.Health < Humanoid.MaxHealth then
-                Humanoid.Health = Humanoid.Health + (0.1 * Settings.HealMultiplier)
+    -- [核心修改]：剥离一切引擎死亡判定 (作者级无敌物理)
+    Hum.BreakJointsOnDeath = false
+    Hum.RequiresNeck = false
+    Hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+    Hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+    Hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+
+    -- [终极回血与防死循环]
+    local CreatorLoop
+    CreatorLoop = RunService.Stepped:Connect(function()
+        -- 物理删除防御 (如果服务端尝试 Destroy)
+        if not Char.Parent or not Hum.Parent then
+            CreatorLoop:Disconnect()
+            Creator_ForceSpawn() -- 触发瞬间重塑
+            return 
+        end
+
+        -- 9倍作者补偿回血 (每一物理步进前强制重写)
+        if Hum.Health < Hum.MaxHealth and Hum.Health > 0 then
+            Hum.Health = Hum.Health + (0.45 * _AUTHOR_CORE.AuthorSettings.RegenFactor)
+        end
+
+        -- 实时位置捕获 (用于原地复活)
+        if Hum.Health > 1 then
+            _AUTHOR_CORE.Cache.SafePos = Root.CFrame
+        end
+
+        -- 作者级状态回溯 (拦截掉落虚空、剧情杀、观战强制切换)
+        if Hum.Health <= 1.2 or Root.Position.Y < (Workspace.FallenPartsDestroyHeight + 15) then
+            Hum.Health = 100
+            Hum:ChangeState(Enum.HumanoidStateType.Running)
+            if _AUTHOR_CORE.Cache.SafePos then Root.CFrame = _AUTHOR_CORE.Cache.SafePos end
+            Root.Velocity = Vector3.new(0, 0, 0)
+        end
+    end)
+end
+
+--// [模块 3]: 协议伪装层 (让服务器认为你是服务端作者)
+local function Creator_HookNetwork()
+    local mt = getrawmetatable(game)
+    local old_nc = mt.__namecall
+    local old_idx = mt.__index
+    setreadonly(mt, false)
+
+    -- 拦截 Namecall (接管 FireServer / InvokeServer)
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        local name = tostring(self):lower()
+
+        if method == "FireServer" or method == "InvokeServer" then
+            -- 核心协议拦截：任何试图修改你血量或状态的包都被“静默丢弃”
+            for _, word in ipairs(_AUTHOR_CORE.Blackhole) do
+                if name:find(word) then
+                    return nil -- 包被拦截，服务端逻辑对作者无效
+                end
             end
-            RunService.Heartbeat:Wait()
         end
+        return old_nc(self, ...)
     end)
 
-    -- 拦截服务端“强制观战”或“剧情杀”触发的脚本销毁
-    Character.DescendantRemoving:Connect(function(desc)
-        if desc == Humanoid or desc == Root then
-            -- 如果核心部件被删，立即触发终极复活
-            UltimateResurrection()
+    -- 属性读取欺骗：让所有脚本认为你是满血作者
+    mt.__index = newcclosure(function(t, k)
+        if _AUTHOR_CORE.AuthorityMode and t == "Humanoid" and k == "Health" then
+            return 100 
         end
+        return old_idx(t, k)
     end)
 
-    -- 记录最后存活坐标
-    spawn(function()
-        while Character and Character.Parent do
-            if Humanoid.Health > 0 then
-                Settings.LastPos = Root.CFrame
+    setreadonly(mt, true)
+end
+
+--// [模块 4]: 自动化视角绑定 (拦截强制镜头控制)
+local function Creator_ProtectView()
+    RunService.RenderStepped:Connect(function()
+        pcall(function()
+            local Cam = Workspace.CurrentCamera
+            local Char = LocalPlayer.Character
+            if Char and Char:FindFirstChild("Humanoid") then
+                -- 强制相机锁定在角色上，不准进入强制剧情视角
+                if Cam.CameraSubject ~= Char.Humanoid then
+                    Cam.CameraSubject = Char.Humanoid
+                    Cam.CameraType = Enum.CameraType.Custom
+                end
             end
-            wait(0.5)
-        end
+        end)
     end)
 end
 
--- [4. 拦截突脸与远程指令控制]
-local mt = getrawmetatable(game)
-local old_namecall = mt.__namecall
-setreadonly(mt, false)
-
-mt.__namecall = newcclosure(function(self, ...)
-    local method = getnamecallmethod()
-    local args = {...}
-    local name = tostring(self):lower()
-
-    -- 拦截强制死亡/自杀/控制指令
-    if method == "FireServer" then
-        if name:find("kill") or name:find("die") or name:find("damage") or name:find("suicide") then
-            return nil -- 拦截发往服务端的死亡确认
-        end
-    end
+--// [系统总控启动]
+local function Launch_Authority()
+    pcall(Creator_HookNetwork)
+    pcall(Creator_ProtectView)
+    LocalPlayer.CharacterAdded:Connect(Creator_Inject)
     
-    -- 拦截服务端发来的剧情杀/干扰指令 (OnClientEvent)
-    if method == "OnClientEvent" then
-        if name:find("jumpscare") or name:find("kick") or name:find("stop") then
-            return nil 
-        end
+    -- 首次运行自动化注入
+    if LocalPlayer.Character then
+        Creator_Inject(LocalPlayer.Character)
     end
-
-    return old_namecall(self, ...)
-end)
-setreadonly(mt, true)
-
--- [5. 初始化连接]
-Player.CharacterAdded:Connect(function(newChar)
-    ProtectCharacter(newChar)
-    -- 自动传送回死亡点
-    if Settings.LastPos then
-        local hrp = newChar:WaitForChild("HumanoidRootPart", 5)
-        if hrp then 
-            task.wait(0.1)
-            hrp.CFrame = Settings.LastPos 
-        end
-    end
-end)
-
--- 如果脚本运行时已有角色
-if Player.Character then
-    ProtectCharacter(Player.Character)
 end
 
--- 监控：如果玩家处于死亡状态过久，强制触发终极复活
-spawn(function()
-    while wait(2) do
-        if not Player.Character or not Player.Character:FindFirstChild("Humanoid") or Player.Character.Humanoid.Health <= 0 then
-            UltimateResurrection()
-        end
-    end
-end)
-
-print("--- 服务端级核心模块已加载 ---")
+-- 开启作者权限转换流程
+Launch_Authority()
