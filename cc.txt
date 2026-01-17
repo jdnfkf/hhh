@@ -1,0 +1,149 @@
+-- Roblox 终极生存与服务端级复活脚本 (Lua 5.1 兼容)
+-- 混淆建议: Prometheus (推荐开启控制流混淆)
+
+local Player = game:GetService("Players").LocalPlayer
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- [1. 创建服务端逻辑模拟核心]
+-- 在 Workspace 中生成一个不可见的配置对象，作为脚本的运行锚点
+local CoreModule = Instance.new("Configuration")
+CoreModule.Name = "ServerCore_RespawnLogic"
+CoreModule.Parent = Workspace
+
+-- 配置参数
+local Settings = {
+    HealMultiplier = 9,
+    LastPos = nil,
+    IsResetting = false
+}
+
+-- [2. 服务端级强制复活函数]
+-- 该功能通过模拟底层的重置信号和清除本地冗余，迫使服务器重新同步角色
+local function UltimateResurrection()
+    if Settings.IsResetting then return end
+    Settings.IsResetting = true
+    
+    print("正在执行服务端级强制重置...")
+
+    -- A. 强制删除当前角色 (绕过所有本地拦截)
+    if Player.Character then
+        Player.Character:BreakJoints() -- 触发死亡逻辑
+        Player.Character:ClearAllChildren() -- 强制删除内容
+        Player.Character:Destroy() -- 强制从 Workspace 移除
+    end
+
+    -- B. 遍历并强制触发游戏可能的重置远程事件
+    -- 很多游戏使用名为 "Reset", "LoadCharacter" 或 "Spawn" 的 RemoteEvent
+    local remotes = game:GetDescendants()
+    for i=1, #remotes do
+        local r = remotes[i]
+        if r:IsA("RemoteEvent") then
+            local n = r.Name:lower()
+            if n:find("reset") or n:find("spawn") or n:find("load") then
+                r:FireServer() -- 尝试给服务端发送生成请求
+            end
+        end
+    end
+
+    -- C. 状态重置与位置还原准备
+    task.wait(0.5)
+    Settings.IsResetting = false
+end
+
+-- [3. 核心保护与拦截逻辑]
+local function ProtectCharacter(Character)
+    local Humanoid = Character:WaitForChild("Humanoid", 10)
+    local Root = Character:WaitForChild("HumanoidRootPart", 10)
+    
+    if not Humanoid or not Root then return end
+
+    -- 锁定生命值与死亡状态
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+    
+    -- 9倍加速回血
+    spawn(function()
+        while Character and Character.Parent and Humanoid do
+            if Humanoid.Health > 0 and Humanoid.Health < Humanoid.MaxHealth then
+                Humanoid.Health = Humanoid.Health + (0.1 * Settings.HealMultiplier)
+            end
+            RunService.Heartbeat:Wait()
+        end
+    end)
+
+    -- 拦截服务端“强制观战”或“剧情杀”触发的脚本销毁
+    Character.DescendantRemoving:Connect(function(desc)
+        if desc == Humanoid or desc == Root then
+            -- 如果核心部件被删，立即触发终极复活
+            UltimateResurrection()
+        end
+    end)
+
+    -- 记录最后存活坐标
+    spawn(function()
+        while Character and Character.Parent do
+            if Humanoid.Health > 0 then
+                Settings.LastPos = Root.CFrame
+            end
+            wait(0.5)
+        end
+    end)
+end
+
+-- [4. 拦截突脸与远程指令控制]
+local mt = getrawmetatable(game)
+local old_namecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    local name = tostring(self):lower()
+
+    -- 拦截强制死亡/自杀/控制指令
+    if method == "FireServer" then
+        if name:find("kill") or name:find("die") or name:find("damage") or name:find("suicide") then
+            return nil -- 拦截发往服务端的死亡确认
+        end
+    end
+    
+    -- 拦截服务端发来的剧情杀/干扰指令 (OnClientEvent)
+    if method == "OnClientEvent" then
+        if name:find("jumpscare") or name:find("kick") or name:find("stop") then
+            return nil 
+        end
+    end
+
+    return old_namecall(self, ...)
+end)
+setreadonly(mt, true)
+
+-- [5. 初始化连接]
+Player.CharacterAdded:Connect(function(newChar)
+    ProtectCharacter(newChar)
+    -- 自动传送回死亡点
+    if Settings.LastPos then
+        local hrp = newChar:WaitForChild("HumanoidRootPart", 5)
+        if hrp then 
+            task.wait(0.1)
+            hrp.CFrame = Settings.LastPos 
+        end
+    end
+end)
+
+-- 如果脚本运行时已有角色
+if Player.Character then
+    ProtectCharacter(Player.Character)
+end
+
+-- 监控：如果玩家处于死亡状态过久，强制触发终极复活
+spawn(function()
+    while wait(2) do
+        if not Player.Character or not Player.Character:FindFirstChild("Humanoid") or Player.Character.Humanoid.Health <= 0 then
+            UltimateResurrection()
+        end
+    end
+end)
+
+print("--- 服务端级核心模块已加载 ---")
